@@ -33,7 +33,25 @@ pnpm install
 pnpm run check      # typecheck + lint + test
 ```
 
-### Database
+### Deploying the backend
+
+One command, safe to re-run:
+
+```bash
+cp .env.example .env      # fill in DATABASE_URL
+./scripts/setup-backend.sh
+```
+
+It applies pending migrations (tracked in `schema_migrations`, so a second run
+is a no-op), creates a read-only `powersync_role` with a generated password,
+writes `PS_DATABASE_URI` to `.env`, and verifies replication end to end. Pass
+`--dry-run` to see the plan first.
+
+It refuses to apply `supabase/ci/`, which is a local-only shim for `auth.uid()`
+and the anon/authenticated roles — applying that to a real Supabase project
+overwrites platform functions.
+
+### Database, by hand
 
 Migrations are plain SQL and run on any Postgres 16. To exercise them locally
 with row-level security actually enforced:
