@@ -199,7 +199,7 @@ Three separate concepts, conflated in revision 1:
 - **Financial ownership** — whose asset or liability it is.
 - **Tax filing unit** — whose return it appears on. Not implied by household.
 
-**RLS does not give sync isolation.** PowerSync Sync Rules decide what is
+**RLS does not give sync isolation.** PowerSync Sync Streams decide what is
 *downloaded*; RLS governs *uploads* reaching Postgres. Two mechanisms, two test
 suites. Tests must assert what actually lands on an unauthorized device, not
 only what a query returns.
@@ -312,13 +312,19 @@ normalization, variable amounts, refunds, and false-positive handling.
 | Risk | Mitigation |
 |---|---|
 | Tauri/Rust PowerSync SDK is alpha | Small pinned connector, no business logic in Rust, web build as live fallback, desktop suite re-run on every upgrade |
-| Local database grows without bound | Date-bucketed sync rules and archiving, designed in Phase 0 |
+| Local database grows without bound | Date-bucketed Sync Streams and archiving, designed in Phase 0 |
 | Business-level sync conflicts | Stable operation ids, uniqueness constraints, visible sync state |
 | Tax maintenance (methods, not just brackets) | Bounded supported set, stated explicitly; authoritative fixtures |
 | Two UI shells for a solo developer | Real and unresolved; distribution milestone pulled forward to expose it early |
 | Browser storage persistence can be denied | Handle denial explicitly; backup/restore is the safety net |
 
 ## Open items
+
+**Sync Streams, not Sync Rules.** PowerSync's own guidance is that Sync
+Rules are legacy and new projects use Sync Streams; earlier revisions of this
+plan used the old term. The isolation argument is unchanged — what is
+*downloaded* is still a separate mechanism from what RLS governs on upload,
+and still needs its own tests.
 
 Resident state and filing status; which banks and brokerages, to prioritize
 import formats; whether a partner joins the household in Phase 1; Supabase and
