@@ -77,10 +77,31 @@ describe("Money algebraic properties", () => {
     fc.assert(
       fc.property(money, money, (a, b) => {
         const cmp = a.compare(b);
-        expect(cmp).toBe(-b.compare(a));
+        const reverse = b.compare(a);
+
+        // Antisymmetry, asserted as a sum rather than as `cmp === -reverse`.
+        // Negating zero in JavaScript produces -0, and `toBe` uses Object.is,
+        // under which Object.is(0, -0) is false — so the negated form fails
+        // whenever a and b happen to be equal. Addition yields +0 in every
+        // case, so this states the property without depending on zero's sign.
+        expect(cmp + reverse).toBe(0);
+
         if (cmp === 0) expect(a.equals(b)).toBe(true);
         if (cmp < 0) expect(b.subtract(a).isPositive()).toBe(true);
         if (cmp > 0) expect(a.subtract(b).isPositive()).toBe(true);
+      }),
+    );
+  });
+
+  it("compares equal values as equal, whichever way round", () => {
+    // The case the antisymmetry assertion above used to trip over: two equal
+    // amounts compare to zero in both directions.
+    fc.assert(
+      fc.property(money, (a) => {
+        const copy = Money.fromScaled(a.scaled, a.currencyCode);
+        expect(a.compare(copy)).toBe(0);
+        expect(copy.compare(a)).toBe(0);
+        expect(a.equals(copy)).toBe(true);
       }),
     );
   });
