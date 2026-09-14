@@ -16,3 +16,7 @@ coverage/
 target/
 supabase/.branches/
 supabase/.temp/
+
+# Installed agent skills keep their own local trim decision, which is a
+# per-checkout choice rather than shared configuration.
+.agents/skills/*/.trim-state.json

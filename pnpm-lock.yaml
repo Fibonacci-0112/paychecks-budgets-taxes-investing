@@ -24,7 +24,74 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.2)
 
+  packages/budget:
+    dependencies:
+      '@finance/money':
+        specifier: workspace:*
+        version: link:../money
+    devDependencies:
+      fast-check:
+        specifier: ^3.23.2
+        version: 3.23.2
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.2)
+
+  packages/import:
+    dependencies:
+      '@finance/money':
+        specifier: workspace:*
+        version: link:../money
+    devDependencies:
+      fast-check:
+        specifier: ^3.23.2
+        version: 3.23.2
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.2)
+
   packages/money:
+    devDependencies:
+      fast-check:
+        specifier: ^3.23.2
+        version: 3.23.2
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.2)
+
+  packages/paycheck:
+    dependencies:
+      '@finance/money':
+        specifier: workspace:*
+        version: link:../money
+      '@finance/tax':
+        specifier: workspace:*
+        version: link:../tax
+    devDependencies:
+      fast-check:
+        specifier: ^3.23.2
+        version: 3.23.2
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.2)
+
+  packages/tax:
+    dependencies:
+      '@finance/money':
+        specifier: workspace:*
+        version: link:../money
     devDependencies:
       fast-check:
         specifier: ^3.23.2

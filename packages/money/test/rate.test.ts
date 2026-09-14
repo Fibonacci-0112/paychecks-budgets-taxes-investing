@@ -73,3 +73,17 @@ describe("Rate applied to Money", () => {
     );
   });
 });
+
+describe("Rate comparison", () => {
+  it("orders rates consistently with their values", () => {
+    const low = Rate.percent("8.93");
+    const high = Rate.percent("22");
+
+    expect(low.lessThan(high)).toBe(true);
+    expect(high.greaterThan(low)).toBe(true);
+    expect(low.lessThanOrEqual(low)).toBe(true);
+    expect(low.greaterThanOrEqual(low)).toBe(true);
+    expect(Rate.min(low, high).equals(low)).toBe(true);
+    expect(Rate.max(low, high).equals(high)).toBe(true);
+  });
+});

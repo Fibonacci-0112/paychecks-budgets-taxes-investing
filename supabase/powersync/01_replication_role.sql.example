@@ -1,0 +1,41 @@
+-- PowerSync replication role.
+--
+-- A template, not a migration: it carries a password, so the real thing never
+-- goes in git. Copy it, generate a password, run it once in the Supabase SQL
+-- editor, then put the resulting connection string in `.env` as
+-- PS_DATABASE_URI and delete your working copy.
+--
+--   openssl rand -base64 32
+--
+-- Run this BEFORE connecting PowerSync to the database, and AFTER the
+-- migrations in supabase/migrations/ have created the tables — the grants
+-- below only cover tables that already exist, which is why the default
+-- privileges line is there for anything added later.
+
+-- Never connect PowerSync as the postgres superuser.
+--
+-- BYPASSRLS is required and is not an oversight: PowerSync replicates whole
+-- tables and filters in powersync/sync-config.yaml instead. That is precisely
+-- why the sync config is the download security boundary and the RLS policies
+-- are not. Read the header of that file before changing either.
+--
+-- The role is REPLICATION + LOGIN + SELECT only. It can read and stream, and
+-- cannot write.
+create role powersync_role
+  with replication bypassrls login
+  password 'REPLACE_WITH_GENERATED_PASSWORD';
+
+grant select on all tables in schema public to powersync_role;
+alter default privileges in schema public
+  grant select on tables to powersync_role;
+
+-- The publication and REPLICA IDENTITY FULL are schema-level and live in
+-- supabase/migrations/0003_powersync_replication.sql instead. Apply the
+-- migrations first; this file only creates the role that reads them.
+
+-- Afterwards, PS_DATABASE_URI takes the form:
+--
+--   postgresql://powersync_role:<password>@db.<project-ref>.supabase.co:5432/postgres?sslmode=verify-full
+--
+-- Use the connection string from the Supabase dashboard rather than assembling
+-- it by hand — poolers and IPv6 make the host vary by project.

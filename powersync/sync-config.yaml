@@ -1,0 +1,153 @@
+# PowerSync Sync Streams.
+#
+# THIS FILE IS THE DOWNLOAD SECURITY BOUNDARY.
+#
+# PowerSync replicates as `powersync_role`, which is created WITH BYPASSRLS —
+# it reads whole tables and filters here instead. The row-level security
+# policies in supabase/migrations/0001_core_ledger.sql therefore govern the
+# upload path only. Every `WHERE household_id IN (...)` clause below is the
+# only thing keeping one household's ledger off another household's device.
+#
+# Two consequences worth stating plainly:
+#   - A missing filter here leaks data even though RLS is correct.
+#   - Testing an RLS policy proves nothing about what actually syncs. The two
+#     need separate tests: assert what lands on an unauthorised device, not
+#     just what a query returns.
+#
+# Deploy with the CLI, never by pasting into the dashboard:
+#   powersync deploy sync-config
+
+config:
+  edition: 3
+
+streams:
+  # --------------------------------------------------------------- identity
+  #
+  # Small, and needed before any screen can render. Split into priority 1 so
+  # the first paint does not wait behind the full ledger: the app can show
+  # accounts and balances-in-progress at the priority 1 checkpoint.
+  #
+  # Honest gating is required of the client in return — only reads fully
+  # covered by this slice may open at that checkpoint. Anything that totals
+  # across history (net worth, a budget's activity) must wait for the full
+  # sync, or partial data gets presented as complete.
+  household:
+    priority: 1
+    auto_subscribe: true
+    queries:
+      # A household row is visible only to its own members. Written as a
+      # subquery on household_members rather than a join so the same shape is
+      # used everywhere below and is easy to audit by eye.
+      - SELECT * FROM households
+        WHERE id IN (
+          SELECT household_id FROM household_members WHERE user_id = auth.user_id()
+        )
+
+      # Every member of your household, so the UI can attribute entries. Note
+      # this is the whole membership row, not just your own — that is
+      # deliberate and is what makes a shared household legible.
+      - SELECT * FROM household_members
+        WHERE household_id IN (
+          SELECT household_id FROM household_members WHERE user_id = auth.user_id()
+        )
+
+      - SELECT * FROM owners
+        WHERE household_id IN (
+          SELECT household_id FROM household_members WHERE user_id = auth.user_id()
+        )
+
+      - SELECT * FROM accounts
+        WHERE household_id IN (
+          SELECT household_id FROM household_members WHERE user_id = auth.user_id()
+        )
+
+  # ----------------------------------------------------------------- ledger
+  #
+  # The bulk of the data, and the part that grows without bound.
+  #
+  # All of it sits in ONE stream using `queries:` rather than a stream per
+  # table. Each unique (stream name + parameter values) pair creates a bucket,
+  # and the per-user limits are 1,000 buckets and 1,000 parameter lookup rows.
+  # One stream per table would multiply bucket count by the table count for no
+  # benefit, since every table shares the same filter.
+  ledger:
+    priority: 2
+    auto_subscribe: true
+    queries:
+      - SELECT * FROM transactions
+        WHERE household_id IN (
+          SELECT household_id FROM household_members WHERE user_id = auth.user_id()
+        )
+
+      - SELECT * FROM postings
+        WHERE household_id IN (
+          SELECT household_id FROM household_members WHERE user_id = auth.user_id()
+        )
+
+      - SELECT * FROM operations
+        WHERE household_id IN (
+          SELECT household_id FROM household_members WHERE user_id = auth.user_id()
+        )
+
+  # -------------------------------------------------- import and reconciling
+  #
+  # Needed to review an import or reconcile a statement, but nothing on a
+  # first screen depends on it. Lowest priority so it never delays a balance.
+  #
+  # `observations` carries the raw imported row in a jsonb column, which makes
+  # this the heaviest stream by volume. If local database size becomes a
+  # problem, this is the first stream to bound — see the note at the foot of
+  # this file.
+  bookkeeping:
+    priority: 3
+    auto_subscribe: true
+    queries:
+      - SELECT * FROM observations
+        WHERE household_id IN (
+          SELECT household_id FROM household_members WHERE user_id = auth.user_id()
+        )
+
+      - SELECT * FROM import_batches
+        WHERE household_id IN (
+          SELECT household_id FROM household_members WHERE user_id = auth.user_id()
+        )
+
+      - SELECT * FROM statements
+        WHERE household_id IN (
+          SELECT household_id FROM household_members WHERE user_id = auth.user_id()
+        )
+
+      - SELECT * FROM reconciliations
+        WHERE household_id IN (
+          SELECT household_id FROM household_members WHERE user_id = auth.user_id()
+        )
+
+      - SELECT * FROM reconciliation_entries
+        WHERE household_id IN (
+          SELECT household_id FROM household_members WHERE user_id = auth.user_id()
+        )
+
+      - SELECT * FROM reconciliation_discrepancies
+        WHERE household_id IN (
+          SELECT household_id FROM household_members WHERE user_id = auth.user_id()
+        )
+
+# ---------------------------------------------------------------------------
+# Deliberately absent, and why
+#
+# No `subscription.parameter()` or `connection.parameter()` anywhere. Those are
+# client-supplied and unsigned, and would need `accept_potentially_dangerous_queries`
+# plus an `auth.user_id()` guard to be safe. Nothing here needs a client-chosen
+# scope: household membership is derived from the signed JWT subject alone, so
+# there is no value a client could supply that it should be trusted about.
+#
+# No per-account privacy inside a household. The schema has no such concept
+# yet, and a half-built version would be a false promise — a "private" account
+# still leaks through counterpart postings, transaction descriptions and
+# household totals. Households are all-or-nothing shared, and the UI says so.
+#
+# No date bounding on the ledger stream yet. Unbounded local growth is a known,
+# recorded risk, but a moving time window needs verification first: a filter
+# whose value changes continuously would churn buckets on every evaluation.
+# Bound it deliberately, with a fixed boundary (an archive flag or a closed
+# accounting period), not with a relative date.
