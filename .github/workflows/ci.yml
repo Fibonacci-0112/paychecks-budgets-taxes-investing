@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm run test
+
+  sql:
+    name: Database schema and policies
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+
+      # Supplies the `auth` schema and the anon/authenticated/service_role roles
+      # that Supabase provides as platform features but a bare Postgres lacks.
+      # Never applied to a real Supabase project.
+      - name: Bootstrap Supabase-equivalent roles and auth shim
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for file in supabase/ci/*.sql; do
+            echo "==> $file"
+            psql -h localhost -U postgres -v ON_ERROR_STOP=1 -q -f "$file"
+          done
+
+      - name: Apply migrations
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for file in supabase/migrations/*.sql; do
+            echo "==> $file"
+            psql -h localhost -U postgres -v ON_ERROR_STOP=1 -q -f "$file"
+          done
+
+      - name: Run policy and constraint tests
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for file in supabase/tests/*.sql; do
+            echo "==> $file"
+            psql -h localhost -U postgres -v ON_ERROR_STOP=1 -q -f "$file"
+          done
