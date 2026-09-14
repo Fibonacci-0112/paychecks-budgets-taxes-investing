@@ -28,6 +28,13 @@ export {
 export { formatDecimal, parseDecimal, type ParseOptions } from "./decimal.js";
 
 export {
+  toDatabaseValue,
+  fromDatabaseValue,
+  sumDatabaseValues,
+  DatabaseValueError,
+} from "./database.js";
+
+export {
   MoneyError,
   CurrencyMismatchError,
   UnknownCurrencyError,

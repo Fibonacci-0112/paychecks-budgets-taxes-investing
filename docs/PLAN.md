@@ -1,239 +1,326 @@
-# Plan: Unified Personal Finance Platform
+# Plan: Unified Personal Finance Platform (revision 2)
 
 ## Context
 
-The repo (`paychecks-budgets-taxes-investing`) is empty except a README. The goal is a
-one-stop personal finance application covering paychecks, budgets, investments, taxes,
-net worth and a large calculator suite, running on desktop, mobile and web.
+Revision 1 was reviewed externally. The review was largely correct, and this
+revision adopts most of it. Three findings matter enough to restate plainly:
 
-Market research (126-app feature survey, plus reviews of Monarch/YNAB/Copilot,
-Boldin/ProjectionLab, Kubera/Sharesight/Snowball) confirms the premise: individual
-features are well covered, but *combinations* are the gap — subscription detection
-appears in only 1 of 21 budgeting apps, debt-payoff optimization is rarely paired with
-cash-flow forecasting, and no consumer product credibly spans ledger + tax planning +
-retirement modeling. Users today stitch together 3-4 paid subscriptions. That seam is
-the product thesis.
+1. **I made a factually wrong claim.** Revision 1 justified TypeScript by saying
+   .NET would put sync on alpha infrastructure. PowerSync's .NET SDK has since
+   reached **beta with full feature parity**. Worse, the TypeScript *desktop*
+   path is itself alpha: the PowerSync Tauri SDK is alpha, built on the alpha
+   Rust SDK, and `connect()` from JavaScript throws — the backend connector must
+   be written in Rust. The conclusion survives; the reasoning did not.
 
-The intended outcome: a local-first, double-entry financial system the user runs daily,
-architected so it can become a multi-tenant product later without a rewrite.
+2. **The precision contract stopped at Postgres.** PowerSync maps Postgres
+   `NUMERIC` to SQLite **`TEXT`**, and SQLite's `SUM()` over a text column
+   silently coerces to float. Measured: `SUM('9007199254740993.0001','0.0001')`
+   returns `9007199254740992` — the fraction gone, the integer part wrong, no
+   error. An exact `Money` type in TypeScript cannot help when the corruption
+   happens in SQL. **`postings.amount numeric(19,4)`, already committed, is a
+   real defect.**
 
----
+3. **"Append-only makes sync nearly conflict-free" was overstated.** It removes
+   row-level conflicts, not business-level ones. Two offline devices can each
+   reverse the same transaction; every entry balances and the result is still
+   wrong. PowerSync also delivers uploads repeatedly and requires idempotency.
 
-## Decisions locked
+Two defects are already committed on `claude/finance-app-planning-8nsiks` and
+are the first work of this revision.
 
-| Area | Decision |
-|---|---|
-| **Audience** | Build multi-tenant + security-correct from day one; no billing/marketing until proven |
-| **Data ingestion** | Manual entry + CSV/OFX/QFX import first; aggregator (Plaid/SimpleFIN) behind an interface, added later |
-| **Platforms** | iOS, Android, Web, Desktop — genuine 50/50 desktop/mobile usage |
-| **App stores** | Real App Store + Play Store presence |
-| **Device features** | Biometric unlock, camera document capture, push notifications, full offline |
-| **Stack** | TypeScript end-to-end |
-| **Data model** | Double-entry ledger, hidden behind plain-language UI |
-| **Backend** | Supabase (Postgres + Auth + Storage + RLS) |
-| **Offline** | Full local-first — complete local SQLite on every device |
-| **Tax depth** | Planning, projections, return prep organization, tax-aware calculators. **No e-file.** |
-| **AI** | None now; three ports designed so it can be added later |
-| **MVP** | Ledger + paycheck + budget |
+### What is preserved
 
-### Why TypeScript and not .NET
+The review invalidated specific decisions, not the foundation. These stay as
+built and tested, and the changes below are made around them:
 
-.NET was evaluated seriously and rejected on evidence, not preference. `System.Decimal`
-is a real advantage for money math, and ASP.NET Core is excellent. But the four
-constraints above are jointly satisfiable in TypeScript today and not in .NET:
-
-- **MAUI cannot target the web at all** — Microsoft's browser answer is Blazor, not MAUI.
-- **PowerSync's .NET SDK is alpha** (`PowerSync.Maui 0.0.4-alpha.1`, "strictly for
-  testing"; Blazor support not yet shipped). Full local-first over Supabase means
-  PowerSync — Zero rejects offline writes outright, ElectricSQL hit reconnection
-  problems in production evaluations. Going .NET puts the *least forgiving* part of the
-  system (offline sync + conflict resolution over financial records) on an alpha SDK.
-- **Blazor WASM AOT** grows the bundle ~1.5-2x to gain runtime speed.
-
-The cost of this choice is that JS has no decimal type. That is mitigated explicitly
-below and is a solved problem; alpha sync infrastructure under a ledger is not.
+- **`packages/money` in full** — `Money`, `Rate`, `allocate`, `divideRound`, 71
+  tests. Its scale-4 `bigint` internal representation turns out to be exactly
+  the right database representation too, so the precision fix *extends* it
+  rather than replacing it.
+- **The `DEFERRABLE INITIALLY DEFERRED` balancing trigger.** The review noted a
+  cross-row total cannot be an ordinary `CHECK` and needs a deferred constraint
+  trigger — which is what is already implemented and tested.
+- `app_assert_posting_tenancy`, the purge protection (flag **and** privileged
+  role), the RLS policies, the SQL test harness, and the CI wiring.
 
 ---
 
-## Architecture
+## Corrections to the record
 
-### Monorepo layout (pnpm workspaces + Turborepo)
-
-```
-packages/
-  money/             Money + Rate value types, currency, allocation      <- write first
-  schema/            Zod schemas, shared types, DB type generation
-  ledger/            Double-entry engine, accounts, postings, lots
-  paycheck/          Gross->net, withholding, pre/post-tax deductions
-  budget/            Periods, envelopes, rollover, sinking funds
-  tax/               Tax engine + versioned bracket data
-  projection/        TVM, amortization, Monte Carlo, retirement
-  calculators/       ~100 pure calculator functions, schema-described
-  import/            CSV/OFX/QFX parsers, column mapping, dedupe
-  providers/         Ports: Categorization, DocumentExtractor, Insight, Aggregator
-  client-data/       PowerSync setup, typed queries, sync rules
-  ui/                Design tokens, chart primitives, shared components
-apps/
-  mobile/            Expo — iOS + Android
-  web/               Next.js
-  desktop/           Tauri wrapper over the web build
-supabase/
-  migrations/        SQL schema + RLS policies
-  functions/         Edge functions
-```
-
-All financial logic lives in `packages/*` as pure, platform-free TypeScript. Apps are
-presentation only. This is what makes three UI targets affordable and keeps the engines
-portable if the UI layer is ever revisited.
-
-### The Money type — do this before anything else
-
-JS `number` must never touch a monetary value.
-
-- `Money` — wraps `bigint` minor units at **scale 4** (displayed at 2), with explicit
-  currency. Immutable. Provides `allocate()` for splitting without losing pennies.
-- `Rate` — `decimal.js` for percentages, tax rates, and intermediate math needing more
-  than 4dp.
-- Branded types + an ESLint rule rejecting raw arithmetic on money-shaped values.
-- Postgres: `NUMERIC(19,4)`. **Never** `float8`/`double precision`.
-
-Getting this wrong is discovered years later, in the form of totals that are off by
-cents and cannot be reconciled.
-
-### Core schema
-
-| Table | Purpose |
+| Revision 1 claim | Correct as of 2026-09-14 |
 |---|---|
-| `households`, `household_members` | Multi-user from day one |
-| `accounts` | type (asset/liability/equity/income/expense) + subtype (checking/brokerage/mortgage/401k/...) |
-| `transactions` | date, payee, memo, status (pending/cleared/reconciled), source |
-| `postings` | transaction_id, account_id, signed amount — **must sum to zero per transaction** (DB constraint) |
-| `securities`, `prices` | Instrument reference + price time series |
-| `lots`, `lot_disposals` | Per-lot cost basis; FIFO/LIFO/SpecID disposal |
-| `categories` | Hierarchical, mapped onto income/expense accounts |
-| `budgets`, `budget_periods`, `budget_allocations` | Budgeting |
-| `goals` | Sinking funds as **equity sub-accounts** so earmarked money isn't double-counted |
-| `rules` | Categorization rules |
-| `documents` | Supabase Storage refs, linked to entity + tax year |
-| `tax_profiles`, `tax_years`, `tax_facts` | Tax inputs and results |
-| `provenance` | What set each derived value (rule / user / model + confidence) |
+| PowerSync .NET SDK is alpha | **Beta**, full feature parity. Blazor still unsupported — which is what actually disqualifies .NET here, given 50/50 web usage |
+| TypeScript avoids alpha sync infrastructure | True on iOS/Android/Web. **False on desktop**: Tauri SDK is alpha, Rust-only connector |
+| Sync is "near conflict-free" | Row conflicts reduced; business conflicts and duplicate delivery remain and need explicit handling |
+| Money is exact because Postgres is `NUMERIC(19,4)` | Only to the sync boundary. Client SQLite is where it breaks |
+| Reconciliation is "cheap later" | It is Phase 1. Without it the paycheck/deposit double-count is structural |
+| Historical net worth is exact | Exact *as recorded*. Backdated imports change history; needs bitemporality |
 
-**Append-only is the key design decision.** Transactions and postings are immutable
-facts; corrections are reversing entries, never mutations. This makes historical net
-worth at any past date exact, gives a real audit trail, and — critically — makes offline
-sync nearly conflict-free, because concurrent devices append rather than contend.
+## Platform / SDK matrix (dated 2026-09-14 — re-verify before Phase 0 closes)
 
-### RLS and tenancy
+| Target | Client | PowerSync SDK | Status |
+|---|---|---|---|
+| iOS / Android | Expo / React Native | `@powersync/react-native` | Production |
+| Web | Next.js (static export) | `@powersync/web` | Production |
+| Desktop | Tauri v2 | `@powersync/tauri-plugin` + `tauri-plugin-powersync` | **Alpha — accepted risk** |
 
-Every table carries `household_id`; policies check membership. A second layer handles
-per-account visibility, for individual accounts inside a shared household. Written and
-tested at Phase 0, not retrofitted.
+### Desktop: accepting alpha means accepting dependency instability
 
-### Local-first sync
+Taken deliberately, with conditions:
 
-PowerSync sync rules bucket by `household_id`; each client mirrors to local SQLite.
-Reads and writes are local and instant; writes queue and upload. Given append-only
-entries, conflicts are rare by construction — reserve last-write-wins for genuinely
-mutable rows (categories, budget targets, settings).
+- **Keep the Rust connector small.** One file, one interface — fetch credentials,
+  upload a batch, report status. No business logic in Rust. All financial
+  behaviour stays in the shared TypeScript engines, so replacing the connector
+  is a contained change.
+- **Pin exact versions.** No carets or ranges on `@powersync/tauri-plugin`,
+  `tauri-plugin-powersync`, or the Rust SDK. `Cargo.lock` and the pnpm lockfile
+  are committed. Upgrades are deliberate, isolated commits with the Phase 0
+  desktop suite re-run.
+- **`SyncStatus.lastSyncedAt`, `hasSynced` and `priorityStatusEntries` are
+  unavailable** on this SDK; read status via `SyncStatus.forStream`.
+- **Fallback stays live**: the web build is a working desktop shell if the alpha
+  proves unworkable. Nothing outside the connector may assume Tauri.
 
-### AI-later seams
+**Phase 0 must prove, on the actual desktop OS — not CI, not a simulator:**
 
-Ports in `packages/providers/`, each with a deterministic implementation now:
+| Property | Evidence required |
+|---|---|
+| Offline persistence | Data written with no network survives and is readable |
+| Restart recovery | Kill the process; local data *and* the pending upload queue are intact |
+| Upload retries | Queued writes retry until accepted; repeated delivery produces no second financial event |
+| Reconnect behaviour | Sync resumes cleanly after the network returns, with no lost or duplicated writes |
 
-| Port | Now | Later |
-|---|---|---|
-| `CategorizationProvider` | Rules engine + string match | Classifier |
-| `DocumentExtractor` | Structured parsers (CSV/OFX), regex paystub templates | Vision model |
-| `InsightProvider` | Typed report queries | NL → query mapping |
+**Tauri requires Next.js `output: 'export'`.** No SSR, server components, API
+routes, middleware, or image optimization in any shared surface. For a
+local-first app reading from local SQLite this is acceptable — but it is settled
+now, before shared code depends on a server feature.
 
-Plus: retain raw import rows and original files permanently, and record provenance on
-every derived value.
+---
+
+## The money precision contract (end to end)
+
+This replaces "Postgres uses `NUMERIC(19,4)`". Every hop is specified.
+
+| Hop | Representation |
+|---|---|
+| TypeScript | `Money` — `bigint` minor units at scale 4 + currency *(unchanged)* |
+| JSON / API | `{ amount: "<scaled integer>", currency: "USD" }` — string, never a JS number |
+| **Postgres** | **`bigint`** scaled minor units. *Not* `NUMERIC` |
+| PowerSync | `bigint` → SQLite `INTEGER` (exact), *not* `TEXT` |
+| Client SQLite | `INTEGER` — `SUM()` stays integer and **throws on overflow** |
+| Display | `Money.format()` at the currency's own precision |
+
+Measured: an `INTEGER` column sums exactly past 2^53 and raises `integer
+overflow` rather than degrading to float. That loud failure is the whole point —
+a `TEXT` column returns a silently wrong float instead.
+
+Range at scale 4 within `bigint`: ±$922 trillion.
+
+**Rules that follow:**
+- A human-readable `NUMERIC` **view** may exist for ad-hoc queries. Never synced,
+  never read by application code.
+- Client SQL may aggregate money **only** on `INTEGER` columns. Authoritative
+  totals go through `Money.sum()`.
+- Separate scales for things that are not money: **security quantities**
+  (scale 8), **unit prices** (scale 6), **FX rates** (reuse `Rate`, scale 12).
+- Mandatory round-trip test: Postgres → sync → SQLite → app, **including
+  aggregates**, asserting exactness.
+
+---
+
+## Transaction lifecycle
+
+Revision 1 collapsed four ideas into one immutable row — which is why fixing a
+typo in a payee name currently requires a reversing journal entry. Separate
+them:
+
+| Concept | Mutability |
+|---|---|
+| **Draft / import review** (`posted_at IS NULL`) | Fully mutable; excluded from all balances |
+| **Posted entry** (`posted_at IS NOT NULL`) | Financial columns frozen; postings immutable |
+| **Descriptive metadata** (payee, memo, category, tags) | Mutable at any time, with provenance |
+| **Bank status** (pending → cleared) | A status transition, not a correction |
+| **Statement reconciliation** | Separate records (below) |
+| **Scheduled / forecast** | Separate table; never mixed into actual balances |
+
+Replace the blanket `transactions_append_only` trigger with column-level
+immutability: reject an UPDATE only when a financially material column changes
+on a posted row. A pending card authorization whose amount settles differently
+must not generate a trail of accounting reversals.
+
+## One financial event, many observations
+
+This is the structural fix for double-counting, and the reason reconciliation
+cannot be deferred.
+
+A **financial event** is the thing that happened in the world. An **observation**
+is evidence of it — a manually recorded paycheck, an imported bank row, a
+brokerage line. **Postings belong to the event, never to the observation.**
+
+- A recorded paycheck and its imported bank deposit are **two observations of one
+  event**. The import matches the existing event, attaches its `source_id`, and
+  marks the posting cleared. It creates **no new postings**. Without this, income
+  and cash are both counted twice.
+- A transfer imported from **both** accounts is likewise one event with exactly
+  two postings. The second side matches the existing event rather than creating a
+  second transaction — otherwise $500 moved looks like $1,000 moved plus a
+  phantom balance.
+- Dedupe keys on `(account_id, source_id)` from the file. **Never** on date +
+  amount + description: legitimate repeated purchases share all three.
+- Anything unmatched goes to a **review queue** as a draft, never silently
+  posted.
+
+## Reconciliation (Phase 1, not deferred)
+
+- **`statements`** — account, period, statement date, **closing balance**.
+- **`reconciliations`** — links a statement to the cleared postings as of that
+  date; records book balance, statement balance, and the **discrepancy**.
+- **Discrepancy review** — lists unmatched entries on both sides, with explicit
+  outcomes: create a missing entry, accept as a timing difference, or flag for
+  investigation. A discrepancy is never silently absorbed.
+- A completed reconciliation is **locked**. Later corrections produce a new
+  reconciliation rather than editing a closed one.
+
+## Conflict and idempotency model
+
+- **Business operations**, not row writes: `post_transaction`,
+  `reverse_transaction`, `import_batch`, each with a **client-generated stable
+  operation id**, unique in the database, so repeated delivery is a no-op.
+- **A transaction can be reversed at most once** — a unique partial index on
+  `reverses_id`, so two offline devices reversing the same entry converge.
+- **Sync state is visible in the UI**: saved locally / awaiting acceptance /
+  rejected. A silently rejected write is worse than an error.
+
+## Tenancy, ownership, and isolation
+
+Three separate concepts, conflated in revision 1:
+
+- **Household** — application access boundary; drives RLS and sync buckets.
+- **Financial ownership** — whose asset or liability it is.
+- **Tax filing unit** — whose return it appears on. Not implied by household.
+
+**RLS does not give sync isolation.** PowerSync Sync Rules decide what is
+*downloaded*; RLS governs *uploads* reaching Postgres. Two mechanisms, two test
+suites. Tests must assert what actually lands on an unauthorized device, not
+only what a query returns.
+
+**Per-account privacy within a shared household is explicitly deferred.** It
+leaks through counterpart postings, descriptions, documents and household
+totals; a partial implementation would be a false promise. Phase 1 households
+are all-or-nothing shared, stated plainly in the UI.
+
+## Other schema decisions revised
+
+- **Sinking funds are budget allocations, not equity sub-accounts.** Earmarking
+  cash does not change assets or net worth.
+- **Bitemporal dates**: `occurred_on` (effective) and `recorded_at` (system), so
+  reports can answer "as known then" despite backdated imports.
+- **Currency identity now**, though MVP is USD-only. Convention already enforced:
+  postings balance within a single currency; cross-currency moves go through an
+  explicit exchange account.
+- **Investments need more than lots + prices**: corporate actions, inter-brokerage
+  transfers, missing basis, and broker reconciliation, before returns are trusted.
 
 ---
 
 ## Phases
 
-**Phase 0 — Foundation (de-risks everything).** Monorepo, `Money`, schema + RLS,
-PowerSync, auth with biometric unlock, CI. Exit criterion: one trivial screen creating a
-record offline on iOS, Android, web and desktop, syncing correctly on reconnect, with
-RLS proven to block cross-household reads. *Do not proceed until this works.*
+**Phase 0 — Prove the financial infrastructure.**
+A balanced transaction survives offline creation, app termination, reconnect,
+**repeated upload**, and **concurrent correction from two devices**; unauthorized
+data never reaches another device (verified by inspecting what syncs, not only
+what queries return); money is exact end to end including aggregates; backup,
+export and a **tested restore** work; and the desktop table above passes on real
+hardware.
 
-**Phase 1 — MVP: Ledger + Paycheck + Budget.** Accounts, double-entry ledger, manual
-entry, CSV/OFX/QFX import with dedupe, categorization rules, budgets, paycheck
-calculator with real withholding, cash-flow forecasting, bill calendar and reminders.
+**Phase 1A — Trustworthy daily ledger.**
+Import bank files, match transfers and paycheck deposits to single events,
+categorize, budget, **reconcile statements with discrepancy review**, export and
+restore. Includes import batches, source ids, and duplicate review.
 
-**Phase 2 — Investments & net worth.** Lots, securities, prices, holdings, dividend
-tracking and growth, rebalancing vs. target allocation, fee-drag comparison, IRR and
-time-weighted return, multi-currency, net worth over time.
+**Phase 1B — Paycheck planning and cash flow.**
+A named, closed set of withholding cases passes authoritative fixtures.
+Forecasts stay separate from actual balances. Bill calendar and reminders.
 
-**Phase 3 — Tax.** Federal + state engine, projections, withholding adequacy, quarterly
-estimates with safe-harbor, Roth conversion and bracket optimization (against bracket
-tops, IRMAA cliffs, NIIT, AMT), return-prep organization.
+**Early distribution milestone.** Installable builds through the real mobile
+channels and on actual desktop operating systems — brought forward, not left to
+the end.
 
-**Phase 4 — Planning & calculators.** Monte Carlo, historical backtesting,
-sequence-of-returns risk, Social Security claiming, RMDs, side-by-side scenarios, goals
-and sinking funds, debt payoff (avalanche/snowball), and the calculator suite.
+**Then, gated:** investments → tax → planning → breadth.
 
-**Phase 5 — Breadth.** Equity comp (RSU/ISO/ESPP vesting, 83(b), AMT on exercise), real
-estate and mortgages, crypto, tax-advantaged account rules, document vault with camera
-capture.
+**Product gate.** The market thesis is a hypothesis. Before expanding into
+investment and tax breadth, this workflow must succeed repeatedly with less
+effort than existing tools: *record a paycheck, fund the budget, anticipate
+bills, reconcile the month.*
 
-**Phase 6 — Release.** App Store and Play Store submission, push notifications. AI layer
-optional, behind the existing ports.
+### Scope discipline
 
-### Deferred but cheap to add later
+Create packages and schema when a working feature needs them — not all up front,
+which locks in assumptions before real workflows expose them. Keep tenant
+isolation from day one. Raw-document retention is **configurable**, not
+unconditional permanent retention.
 
-Deselected during planning, noted because each is nearly free once its prerequisite
-exists: **reconciliation** (a `cleared` flag + statement-balance view — the ledger
-already supports it), **tax-loss harvesting / asset location** (falls out of per-lot
-cost basis from Phase 2 plus the Phase 3 tax engine), **subscription detection** (a
-query over recurring-transaction detection already built in Phase 1).
+### Tax scope, restated honestly
+
+Annual maintenance is not a JSON bracket update: IRS Pub 15-T changes methods
+and forms, not just amounts. Phase 1B needs an explicitly bounded foundation —
+supported tax year, W-4 inputs, pay frequency, YTD wages, deduction treatment,
+named jurisdictions.
+
+Deferred items are **"prerequisites identified, effort unestimated"**, not
+"cheap later". Tax-loss harvesting does not fall out of lots: wash sales span
+accounts, a spouse, and IRAs (Pub 550). Subscription detection needs merchant
+normalization, variable amounts, refunds, and false-positive handling.
 
 ---
 
-## Testing
+## Immediate work on approval
 
-A money app earns trust through tests, not features.
-
-- **Property-based** (`fast-check`) for ledger invariants: postings always sum to zero;
-  account balance equals the sum of its postings; balance reconstructed at any date T is
-  stable regardless of insertion order.
-- **Golden-file** tests for tax and paycheck math against published IRS examples and real
-  paystubs. Bracket data is versioned per year and jurisdiction as JSON, so annual
-  updates are a data change with a test fixture — not a code change.
-- **Sync tests**: two simulated offline clients, divergent edits, verified convergence.
-- **RLS tests**: every table, asserting cross-household reads and writes are denied.
-- No `number` arithmetic on money anywhere — enforced by lint, verified in CI.
+1. **Fix the precision defect** — `postings.amount` → `bigint` scaled minor
+   units; add `Money` ↔ DB binding helpers; add the human-readable `NUMERIC`
+   view. `packages/money` itself is unchanged.
+2. **Fix the lifecycle defect** — replace the blanket append-only trigger with
+   column-level immutability plus a draft state. Keep the deferred balancing
+   trigger exactly as is. Test that a payee typo is editable and a posted amount
+   is not.
+3. Add `reverses_id` unique partial index and the `operations` table with unique
+   client operation ids; test double-reversal and repeated upload.
+4. Add `financial_events` / observations, `statements`, `reconciliations`.
+5. **Update `docs/PLAN.md` and the PR description** to match, retracting the
+   overstated claims.
+6. Only then continue to Phase 0's sync proof.
 
 ## Verification
 
-1. `pnpm test` — unit, property, and golden-file suites across all packages.
-2. `supabase start && pnpm test:rls` — policies against a local Postgres.
-3. Offline scenario: airplane-mode on device, create and edit records, reconnect,
-   confirm convergence across all four clients.
-4. Import a real bank CSV and a real paystub PDF; confirm balances and net pay match the
-   source documents exactly.
-5. `pnpm dev` per app; manual pass on iOS simulator, Android emulator, browser, Tauri.
+- `pnpm test` — unit and property suites (71 existing tests must stay green).
+- SQL suite against real Postgres 16: RLS, balance invariant, lifecycle rules,
+  idempotency constraints, reconciliation.
+- **Precision round-trip**: Postgres → PowerSync → SQLite → app, asserting exact
+  values *and* exact aggregates.
+- **Sync isolation**: two devices, two households; assert the unauthorized device
+  never receives the rows at all.
+- **Conflict**: two offline devices reverse the same transaction; assert one
+  reversal survives.
+- **Double-count**: record a paycheck, import the matching bank deposit; assert
+  one event, one set of postings, correct income and cash. Repeat for a transfer
+  imported from both sides.
+- **Desktop**: the four-property table above, on real hardware.
+- Backup → wipe → restore, asserting an identical ledger.
 
 ## Risks
 
 | Risk | Mitigation |
 |---|---|
-| Scope is genuinely multi-year | Strict phase gates; Phase 1 must be daily-usable alone |
-| Tax data maintenance (annual x 50 states) | Data-driven brackets; start federal + resident state |
-| PowerSync cost/limits at scale | Interface-isolated; self-hosted PowerSync is an option |
-| App Store scrutiny for finance apps | Phase 6, with no financial-institution claims |
-| Money precision bugs | `Money` type + lint + property tests from day one |
+| Tauri/Rust PowerSync SDK is alpha | Small pinned connector, no business logic in Rust, web build as live fallback, desktop suite re-run on every upgrade |
+| Local database grows without bound | Date-bucketed sync rules and archiving, designed in Phase 0 |
+| Business-level sync conflicts | Stable operation ids, uniqueness constraints, visible sync state |
+| Tax maintenance (methods, not just brackets) | Bounded supported set, stated explicitly; authoritative fixtures |
+| Two UI shells for a solo developer | Real and unresolved; distribution milestone pulled forward to expose it early |
+| Browser storage persistence can be denied | Handle denial explicitly; backup/restore is the safety net |
 
-## Open items (setup data, not blockers)
+## Open items
 
-Resident state and filing status (determines which state module ships first); which
-brokerages and banks, to prioritize import formats; whether a partner joins the
-household in Phase 1 or later.
-
-## First actions on approval
-
-1. Scaffold the monorepo and CI.
-2. Implement and fully test `packages/money`.
-3. Write the Phase 0 schema + RLS policies and prove isolation.
-4. Stand up PowerSync and ship the Phase 0 exit-criterion screen on all four clients.
+Resident state and filing status; which banks and brokerages, to prioritize
+import formats; whether a partner joins the household in Phase 1; Supabase and
+PowerSync credentials, which block Phase 0's sync proof; which desktop OS the
+Phase 0 desktop suite must pass on.

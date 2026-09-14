@@ -59,8 +59,30 @@ explicitly in the tax engine.
 - `Rate` — `bigint` at **12 decimal places**. Dimensionless, so it cannot be
   accidentally added to an amount.
 
-Postgres columns must be `NUMERIC(19, 4)` to match. `toNumericString()` produces
-a string that binds directly, with no float in the path.
+## Storing money
+
+**Columns are `bigint` scaled minor units, named `amount_units`. Never
+`NUMERIC`.** Use `toDatabaseValue` / `fromDatabaseValue`.
+
+This is forced by the sync layer, not by taste. PowerSync maps Postgres
+`NUMERIC` to SQLite `TEXT`, and SQLite's `SUM()` over a text column silently
+coerces to a float:
+
+```
+SUM('9007199254740993.0001', '0.0001')  ->  9007199254740992
+```
+
+The fraction is gone, the integer part is wrong, and no error is raised. An
+exact `Money` type in TypeScript cannot help when the corruption happens inside
+SQL — branded types and lint rules do not see into a query.
+
+An `INTEGER` column sums exactly and raises `integer overflow` rather than
+degrading to a float. A loud failure is the property worth having.
+
+`fromDatabaseValue` refuses a value containing a decimal point, so a column that
+drifts back to `NUMERIC` fails immediately instead of quietly. A human-readable
+`NUMERIC` view exists for ad-hoc queries; it is never synced and never read by
+application code.
 
 ## Currencies
 
