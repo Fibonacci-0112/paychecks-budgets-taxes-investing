@@ -92,6 +92,30 @@ export class Rate {
     return this.scaled === other.scaled;
   }
 
+  lessThan(other: Rate): boolean {
+    return this.scaled < other.scaled;
+  }
+
+  lessThanOrEqual(other: Rate): boolean {
+    return this.scaled <= other.scaled;
+  }
+
+  greaterThan(other: Rate): boolean {
+    return this.scaled > other.scaled;
+  }
+
+  greaterThanOrEqual(other: Rate): boolean {
+    return this.scaled >= other.scaled;
+  }
+
+  static min(a: Rate, b: Rate): Rate {
+    return a.lessThan(b) ? a : b;
+  }
+
+  static max(a: Rate, b: Rate): Rate {
+    return a.greaterThan(b) ? a : b;
+  }
+
   isZero(): boolean {
     return this.scaled === 0n;
   }
